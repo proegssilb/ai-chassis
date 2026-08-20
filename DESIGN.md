@@ -105,27 +105,89 @@ one):
 The engine may end up supporting more than one substrate rather than
 picking a single one — see the open problem below.
 
-### 3.3 Invocation contract (open design problem)
+### 3.3 Invocation contract: two-pass, onion-shaped
 
 If Docker, Wasm, and HTTP middleware all need to be interchangeable from
 the engine's point of view — i.e., the pipeline shouldn't care *how* a given
 middleware step is deployed — there needs to be a **common invocation
 contract**: a substrate-independent shape for "call this middleware with
-this request context, get back this result (or a mutated request, or a
-decision to short-circuit, etc.)."
+this context, get back a mutated request or response."
 
-This is unresolved. Candidate shapes to explore (not decided):
+Web application middleware (Express, Koa, ASP.NET Core, and similar)
+already solved a version of this problem, and the answer generalizes here:
+middleware isn't a one-way pipe from client to backend. It's **two passes
+through the same ordered stack — an onion, not a conveyor belt.** A request
+passes inward through each middleware layer on its way to the model; the
+response passes back outward through the same layers, in reverse order, on
+its way to the client. Each middleware gets (up to) two hooks, not one: a
+request-phase hook and a response-phase hook.
 
-- A fixed HTTP-shaped contract that all substrates present uniformly (Docker
-  and Wasm middleware would each need an adapter that exposes this
-  interface even if the underlying transport differs).
-- A schema for request/response envelopes independent of transport, with
-  substrate-specific adapters in the engine responsible for getting bytes
-  in and out.
-- Whether middleware is limited to "transform the request" / "transform the
-  response," or can also do things like short-circuit the pipeline, fan out
-  to multiple backends, or maintain state across calls (memory middleware
-  almost certainly needs this).
+This settles a question that a request-only model can't answer cleanly —
+whether stateful middleware "fits" a model that only transforms requests.
+It doesn't need to, because that's not the model. A middleware that needs
+state across the round trip — memory being the
+clearest case, but also e.g. token-budget tracking, or an MCP tool call
+whose result needs to be woven into the eventual response — stashes
+whatever it needs when it sees the request on the way in, and picks it back
+up when that same invocation's response passes back through on the way out.
+Purely stateless middleware (e.g. a RAG lookup that only ever touches the
+outbound request) simply doesn't implement the response-phase hook, or
+implements it as a passthrough. Stateful and stateless middleware are both
+first-class under this shape, not special cases of each other.
+
+```mermaid
+flowchart LR
+    client[Client app]
+    mw1[Middleware 1<br/>e.g. memory]
+    mw2[Middleware 2<br/>e.g. RAG]
+    mw3[Middleware 3<br/>e.g. MCP tools]
+    backend[Inference backend]
+
+    client -->|"1 request in"| mw1
+    mw1 -->|"2 request in"| mw2
+    mw2 -->|"3 request in"| mw3
+    mw3 -->|"4 request in"| backend
+    backend -->|"5 response out"| mw3
+    mw3 -->|"6 response out"| mw2
+    mw2 -->|"7 response out"| mw1
+    mw1 -->|"8 response out"| client
+```
+
+Same three middleware, two passes: request phase runs 1→2→3 (client toward
+backend), response phase runs the *same stack in reverse*, 3→2→1 (backend
+back toward client) — mirrored order, the same guarantee every web
+middleware framework makes.
+
+What this reframes, rather than resolves:
+
+- **Correlation across the two passes.** Because middleware run as separate
+  external processes (§3.2), not in-process objects that can just close
+  over local state, a middleware instance needs some way to recognize "this
+  response-phase call is the other half of that request-phase call I saw
+  earlier" — a request/invocation ID the engine threads through both calls,
+  at minimum. This matters more for substrates with no guaranteed process
+  affinity (e.g. HTTP middleware behind a load balancer) than for a
+  long-lived container that can just hold the state in memory.
+- **Whether every middleware must implement both hooks**, or whether
+  request-only / response-only middleware is a first-class, cheaper case
+  the engine can optimize (e.g. skip the response-phase call entirely
+  rather than invoking a no-op).
+- **Streaming responses.** A response-phase pass that runs once, after the
+  full response is available, is straightforward but kills token-by-token
+  streaming to the client. A pass that runs per-chunk is streaming-friendly
+  but means "the response" a middleware sees on the way out is partial,
+  which is a much harder thing for a middleware to reason about or mutate
+  correctly.
+- **Substrate-level shape of the contract** — HTTP-uniform interface vs. a
+  transport-independent schema with per-substrate adapters (per §3.2) —
+  which is a separate question from the two-pass shape itself: the onion
+  model says *what* the contract needs to express (a request phase and a
+  response phase, correlated), not *how* each substrate physically carries
+  that.
+- Whether middleware can also do things beyond transform-in-place — e.g.
+  short-circuit the pipeline entirely, or fan out to multiple backends —
+  and how that interacts with a response phase that assumes something is
+  coming back through the stack it went out through.
 
 This contract is arguably the most architecturally important unresolved
 piece of the whole project, since it determines how much freedom exists on
@@ -133,28 +195,25 @@ the substrate question later.
 
 ### 3.4 Request flow (illustrative, not final)
 
+The stack in §3.3's diagram is what the TOML file describes: an ordered
+list of middleware, each backed by one of the candidate execution
+substrates.
+
 ```mermaid
-flowchart LR
-    client[Client app] -->|API call| engine[ai-chassis engine]
-    engine --> mw1[Middleware step 1<br/>e.g. memory lookup]
-    mw1 --> mw2[Middleware step 2<br/>e.g. RAG retrieval]
-    mw2 --> mw3[Middleware step 3<br/>e.g. MCP tool orchestration]
-    mw3 -->|modified request| backend[Inference backend<br/>Ollama / vLLM / provider API]
-    backend -->|response| engine
-    engine -->|response| client
+flowchart TB
+    mw1[Middleware 1] -.runs on.-> substrates
+    mw2[Middleware 2] -.runs on.-> substrates
+    mw3[Middleware 3] -.runs on.-> substrates
 
     subgraph substrates[middleware execution substrates]
         docker[Docker]
         wasm[Wasm]
         http[Remote HTTP]
     end
-    mw1 -.runs on.-> substrates
-    mw2 -.runs on.-> substrates
-    mw3 -.runs on.-> substrates
 ```
 
-Each middleware step, its order, and its config are what the TOML file
-describes. The diagram shows a linear pipeline for simplicity; whether the
+Each middleware's substrate, config, and position in the stack are what the
+TOML file records. The stack shown is linear for simplicity; whether the
 real model is strictly linear, a DAG, or allows branching/short-circuiting
 is part of the open invocation-contract question above.
 
@@ -210,12 +269,22 @@ designed yet.
 
 ## 7. Open questions (tracking)
 
-- What does the invocation contract for middleware actually look like?
-  (§3.3 — the biggest open item.)
+- What does the invocation contract for middleware actually look like at
+  the substrate level (HTTP-uniform interface vs. schema + per-substrate
+  adapters)? (§3.3 — the biggest open item; the two-pass *shape* of the
+  contract is settled, the wire-level details are not.)
+- How is a middleware's response-phase call correlated with its own earlier
+  request-phase call when the two happen as separate invocations of a
+  separate external process? (§3.3)
+- Does every middleware implement both hooks, or is request-only /
+  response-only a distinct, cheaper case the engine special-cases?
+- How does the response phase interact with streaming responses — does it
+  run once on the full response (simple, kills streaming) or per-chunk
+  (streaming-friendly, harder for middleware to reason about)?
 - Is the middleware pipeline linear, a DAG, or something that allows
-  short-circuiting / fan-out?
-- How does stateful middleware (memory, in particular) fit a model that's
-  otherwise "transform a request as it passes through"?
+  short-circuiting / fan-out — and how does short-circuiting interact with
+  a response phase that expects to walk back out through the stack it
+  entered?
 - Which single substrate (if any) should V1 target first — Docker, Wasm, or
   HTTP — given each has a different cost to stand up a first working
   example?
