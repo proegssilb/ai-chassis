@@ -217,6 +217,68 @@ TOML file records. The stack shown is linear for simplicity; whether the
 real model is strictly linear, a DAG, or allows branching/short-circuiting
 is part of the open invocation-contract question above.
 
+### 3.5 Recursion: how much of the stack re-runs?
+
+§3.3 covers a single round trip: one request phase in, one response phase
+out. That's not enough for agentic behavior. When MCP tool orchestration
+middleware sees, on the response phase, that the model wants to call a
+tool, "transform the response and keep unwinding" isn't the right move —
+the tool needs to run, its result needs to go back to the model, and the
+model needs another turn before anything is ready to return to the client.
+That's the response phase deciding a new request phase has to happen,
+mid-unwind, without a new inbound client request driving it.
+
+So the invocation contract needs recursion triggerable from **both** sides:
+the normal case (client → request phase → backend) and this case (a
+middleware's response-phase hook → another request phase → backend again).
+Web middleware frameworks don't usually need the second kind — an Express
+or Koa response-phase handler doesn't get to say "hold on, re-invoke the
+handler before you finish unwinding." Here, it has to.
+
+Once a middleware can trigger that, there's a real cost/consistency
+trade-off in how much of the stack re-runs:
+
+- **Heavy recursion.** A triggered loop re-enters at the *top* of the
+  stack, exactly like a fresh top-level request — layer 1 through the
+  backend and back out again, every time. Every layer gets a simple,
+  uniform guarantee: "whatever loop iteration this is, I see the full
+  current state of the turn, handled the same way I'd handle any request."
+  Costly if it means memory lookup or RAG retrieval — work that's already
+  done for this logical turn — re-runs on every tool-call round trip.
+- **Light recursion.** A triggered loop re-enters only at (or below) the
+  layer that triggered it — outer layers that already did their job for
+  this turn are skipped on the loop. Cheaper, but the engine now has to
+  track *where* in the stack a given loop re-enters, and outer middleware
+  that never sees the intermediate loops has to trust that skipping them
+  was fine — a much weaker guarantee than "I always see every pass."
+
+```mermaid
+flowchart LR
+    client[Client app]
+    mw1[Middleware 1<br/>e.g. memory]
+    mw2[Middleware 2<br/>e.g. RAG]
+    mw3[Middleware 3<br/>e.g. MCP tools]
+    backend[Inference backend]
+
+    client --> mw1 --> mw2 --> mw3 --> backend
+    backend -.tool call detected on response phase.-> mw3
+    mw3 -.heavy: re-enter at layer 1.-> mw1
+    mw3 -.light: re-enter at layer 3 only.-> mw3
+```
+
+Neither option is picked yet. This also isn't independent of the other
+open items in §3.3 — it makes them sharper:
+
+- **Correlation.** If light recursion means outer middleware only see part
+  of a multi-loop turn, "which invocation is this the other half of"
+  (§3.3) has to mean "which *turn*," not just "which single request/response
+  pair" — a turn may now span several request/response pairs.
+- **Streaming.** Does the client see intermediate tool-call turns at all,
+  or only the final answer once the loop resolves (§3.3)?
+- **Termination.** Nothing here yet decides how a loop stops — max
+  iterations, a timeout, or a middleware itself declining to loop again are
+  all plausible and none is chosen.
+
 ## 4. V1 scope
 
 **In scope for V1:**
@@ -285,6 +347,12 @@ designed yet.
   short-circuiting / fan-out — and how does short-circuiting interact with
   a response phase that expects to walk back out through the stack it
   entered?
+- Heavy vs. light recursion for middleware-triggered loops (§3.5): does a
+  loop re-enter the whole stack from the top, or only the layer that
+  triggered it and everything inward of it — and how does the engine track
+  where "re-entry" starts for the light case?
+- How does a middleware-triggered loop terminate — max iterations, a
+  timeout, a middleware declining to loop again, some combination? (§3.5)
 - Which single substrate (if any) should V1 target first — Docker, Wasm, or
   HTTP — given each has a different cost to stand up a first working
   example?
