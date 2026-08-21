@@ -324,9 +324,15 @@ duplicate functionality from ai-chassis, or may choose to manage ai-chassis
 itself. There are use cases for each path, and it is not the job of
 ai-chassis to go out of its way to make any of those paths harder.
 
-MCP gateways are great for the problems they do solve, but the box they
-paint themselves into prevents them from having the same power an MCP
-calling middleware could have.
+MCP gateways are great for the problems they do solve — routing and
+observability across tool calls — but they're structurally half-blind:
+they only ever see the tool call traffic, never the request that produced
+it. That rules out things like Tool RAG (deciding which tools to even
+expose to the model based on what's actually in the prompt), because the
+prompt itself is invisible to an MCP gateway. An MCP-orchestration
+middleware inside ai-chassis doesn't have that limitation — it sits inside
+the two-pass stack (§3.3) and sees the full request on the way in, not
+just whatever tool call falls out the other end.
 
 ## 7. Open questions (tracking)
 
