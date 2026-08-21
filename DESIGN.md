@@ -77,10 +77,7 @@ This gives the project a concrete, testable definition of done for V1: take
 a running system, make sure it can forward a conversation correctly, export
 its config, hand the file to someone else (or another instance), import it,
 and get the same system back — same middleware stack, same behavior against
-the same set of example conversations. (No formal test suite is designed
-yet; "same tests" here just means some fixed set of representative
-request/response pairs to replay before and after the round-trip, so
-"same config back" doesn't just mean the TOML diffed identically.)
+the same set of example conversations.
 
 ### 3.2 Middleware are external processes, not library code
 
