@@ -74,8 +74,10 @@ middleware are wired in, their order, their individual configuration, and
 which inference backend(s) the assembled pipeline calls.
 
 This gives the project a concrete, testable definition of done for V1: take
-a running system, export its config, hand the file to someone else (or
-another instance), import it, and get the same system back.
+a running system, make sure it can forward a conversation correctly, export 
+its config, hand the file to someone else (or another instance), import it,
+and get the same system back, complete with the same behavior for the same
+tests.
 
 ### 3.2 Middleware are external processes, not library code
 
@@ -106,34 +108,21 @@ The engine may end up supporting more than one substrate rather than
 picking a single one — see the open problem below.
 
 ### 3.3 Invocation contract: two-pass, onion-shaped
-
-If Docker, Wasm, and HTTP middleware all need to be interchangeable from
-the engine's point of view — i.e., the pipeline shouldn't care *how* a given
-middleware step is deployed — there needs to be a **common invocation
-contract**: a substrate-independent shape for "call this middleware with
-this context, get back a mutated request or response."
-
-Web application middleware (Express, Koa, ASP.NET Core, and similar)
-already solved a version of this problem, and the answer generalizes here:
-middleware isn't a one-way pipe from client to backend. It's **two passes
+Middleware isn't a one-way pipe from client to backend. It's **two passes
 through the same ordered stack — an onion, not a conveyor belt.** A request
 passes inward through each middleware layer on its way to the model; the
 response passes back outward through the same layers, in reverse order, on
 its way to the client. Each middleware gets (up to) two hooks, not one: a
 request-phase hook and a response-phase hook.
 
-This settles a question that a request-only model can't answer cleanly —
-whether stateful middleware "fits" a model that only transforms requests.
-It doesn't need to, because that's not the model. A middleware that needs
-state across the round trip — memory being the
-clearest case, but also e.g. token-budget tracking, or an MCP tool call
-whose result needs to be woven into the eventual response — stashes
-whatever it needs when it sees the request on the way in, and picks it back
-up when that same invocation's response passes back through on the way out.
-Purely stateless middleware (e.g. a RAG lookup that only ever touches the
-outbound request) simply doesn't implement the response-phase hook, or
-implements it as a passthrough. Stateful and stateless middleware are both
-first-class under this shape, not special cases of each other.
+This allows stateful and stateless middleware equally well. A middleware that 
+needs state across the round trip — memory being the clearest case, but also 
+e.g. token-budget tracking, or an MCP tool call whose result needs to be woven
+into the eventual response — stashes whatever it needs when it sees the request
+on the way in, and picks it back up when that same invocation's response
+passes back through on the way out. Purely stateless middleware (e.g. a RAG 
+lookup that only ever touches the request, never the response) simply doesn't
+implement the response-phase hook, or implements it as a passthrough.
 
 ```mermaid
 flowchart LR
@@ -168,10 +157,6 @@ What this reframes, rather than resolves:
   at minimum. This matters more for substrates with no guaranteed process
   affinity (e.g. HTTP middleware behind a load balancer) than for a
   long-lived container that can just hold the state in memory.
-- **Whether every middleware must implement both hooks**, or whether
-  request-only / response-only middleware is a first-class, cheaper case
-  the engine can optimize (e.g. skip the response-phase call entirely
-  rather than invoking a no-op).
 - **Streaming responses.** A response-phase pass that runs once, after the
   full response is available, is straightforward but kills token-by-token
   streaming to the client. A pass that runs per-chunk is streaming-friendly
@@ -184,10 +169,10 @@ What this reframes, rather than resolves:
   model says *what* the contract needs to express (a request phase and a
   response phase, correlated), not *how* each substrate physically carries
   that.
-- Whether middleware can also do things beyond transform-in-place — e.g.
-  short-circuit the pipeline entirely, or fan out to multiple backends —
-  and how that interacts with a response phase that assumes something is
-  coming back through the stack it went out through.
+- **Control flow implementation.** Recursion (for tools) and short-circuiting
+  (for caching and rate-limiting) will have to be available to middleware.
+  How the signaling works for those two cases while staying inside the
+  onion-style layering principle is a detail that will have to be evaluated.
 
 This contract is arguably the most architecturally important unresolved
 piece of the whole project, since it determines how much freedom exists on
@@ -296,20 +281,20 @@ open items in §3.3 — it makes them sharper:
 **Explicitly out of scope for V1** (may come later, not blocking the first
 deliverable):
 
-- Multi-provider routing/failover as a polished feature.
-- A plugin marketplace or ecosystem of pre-built middleware.
-- Support for every candidate substrate simultaneously.
-- A UI. V1 is API/config-level only.
+- Multi-provider routing/failover as a polished feature. Not useful for
+  early prototypes, easy to implement in middleware.
+- A plugin marketplace or ecosystem of pre-built middleware. Important, but
+  needs the concept proven before it's worth building.
+- Support for every candidate substrate simultaneously. Easy enough to add
+  later.
+- A UI. V1 is API/config-level only. Important, doesn't prove the concept.
 
 ## 5. Philosophy
 
-Favor fast iteration over up-front architectural certainty. The plan is to
-use Claude Code to scaffold and rebuild quickly rather than trying to fully
-resolve open questions (substrate choice, invocation contract shape, config
-schema details) on paper first. The working assumption is that real usage —
-actually building a middleware, actually wiring a pipeline, actually
-exporting and re-importing a config — will surface bad assumptions faster
-and more reliably than more up-front design thinking would.
+Favor fast iteration over up-front architectural certainty. It's unknown
+whether this category of software provides any value at all. So prove the
+cheapest version of the concept possible, measure its value, and if the
+idea is worth iterating on, do so in ways that are cheap and high-value.
 
 Practical implication: nothing in this document should be read as locked
 in. Sections 3.3 and 4 in particular are expected to change once there's
@@ -319,7 +304,7 @@ point and shared vocabulary, not to prevent iteration from changing course.
 ## 6. Relationship to adjacent tools
 
 LLM gateways (Bifrost, Kong AI Gateway, Portkey, TrueFoundry) and
-ai-chassis are adjacent, not competing. Gateways answer "how do I route,
+ai-chassis solve different problems. Gateways answer "how do I route,
 observe, and govern calls across multiple LLM providers and MCP tools."
 ai-chassis is trying to answer a layer up: "what is the declarative,
 portable shape of an AI system as a whole, of which an LLM call is one
@@ -328,6 +313,20 @@ connection as an implementation detail (e.g., the thing ai-chassis calls
 when it forwards a request to "the inference backend" could itself be a
 gateway doing provider routing). That composition is speculative, not
 designed yet.
+
+Harnesses for coding agents duplicate functionality, and this is acceptable;
+the functionality and tools you setup in ai-chassis are expected to generalize
+across different user-facing surfaces, while MCPs set up in a coding agent
+probably do not generalize outside of coding.
+
+Chat UIs may choose to be a minimal skin over ai-chassis, or may choose to
+duplicate functionality from ai-chassis, or may choose to manage ai-chassis
+itself. There are use cases for each path, and it is not the job of
+ai-chassis to go out of its way to make any of those paths harder.
+
+MCP gateways are great for the problems they do solve, but the box they
+paint themselves into prevents them from having the same power an MCP
+calling middleware could have.
 
 ## 7. Open questions (tracking)
 
@@ -338,8 +337,7 @@ designed yet.
 - How is a middleware's response-phase call correlated with its own earlier
   request-phase call when the two happen as separate invocations of a
   separate external process? (§3.3)
-- Does every middleware implement both hooks, or is request-only /
-  response-only a distinct, cheaper case the engine special-cases?
+- How does middleware signal its lack of participation in a hook event?
 - How does the response phase interact with streaming responses — does it
   run once on the full response (simple, kills streaming) or per-chunk
   (streaming-friendly, harder for middleware to reason about)?
@@ -359,6 +357,3 @@ designed yet.
 - What does the TOML schema actually need to express to be a *complete*
   system definition (middleware graph + config + backend connection), and
   what's the minimum viable version of that for V1?
-- Implementation language/runtime for the engine itself is not yet decided
-  in writing anywhere in this doc, though repo scaffolding currently
-  suggests Rust is the leading candidate.
