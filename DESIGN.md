@@ -74,10 +74,13 @@ middleware are wired in, their order, their individual configuration, and
 which inference backend(s) the assembled pipeline calls.
 
 This gives the project a concrete, testable definition of done for V1: take
-a running system, make sure it can forward a conversation correctly, export 
+a running system, make sure it can forward a conversation correctly, export
 its config, hand the file to someone else (or another instance), import it,
-and get the same system back, complete with the same behavior for the same
-tests.
+and get the same system back — same middleware stack, same behavior against
+the same set of example conversations. (No formal test suite is designed
+yet; "same tests" here just means some fixed set of representative
+request/response pairs to replay before and after the round-trip, so
+"same config back" doesn't just mean the TOML diffed identically.)
 
 ### 3.2 Middleware are external processes, not library code
 
@@ -108,6 +111,7 @@ The engine may end up supporting more than one substrate rather than
 picking a single one — see the open problem below.
 
 ### 3.3 Invocation contract: two-pass, onion-shaped
+
 Middleware isn't a one-way pipe from client to backend. It's **two passes
 through the same ordered stack — an onion, not a conveyor belt.** A request
 passes inward through each middleware layer on its way to the model; the
@@ -115,12 +119,12 @@ response passes back outward through the same layers, in reverse order, on
 its way to the client. Each middleware gets (up to) two hooks, not one: a
 request-phase hook and a response-phase hook.
 
-This allows stateful and stateless middleware equally well. A middleware that 
-needs state across the round trip — memory being the clearest case, but also 
+This allows stateful and stateless middleware equally well. A middleware that
+needs state across the round trip — memory being the clearest case, but also
 e.g. token-budget tracking, or an MCP tool call whose result needs to be woven
 into the eventual response — stashes whatever it needs when it sees the request
 on the way in, and picks it back up when that same invocation's response
-passes back through on the way out. Purely stateless middleware (e.g. a RAG 
+passes back through on the way out. Purely stateless middleware (e.g. a RAG
 lookup that only ever touches the request, never the response) simply doesn't
 implement the response-phase hook, or implements it as a passthrough.
 
@@ -169,10 +173,11 @@ What this reframes, rather than resolves:
   model says *what* the contract needs to express (a request phase and a
   response phase, correlated), not *how* each substrate physically carries
   that.
-- **Control flow implementation.** Recursion (for tools) and short-circuiting
-  (for caching and rate-limiting) will have to be available to middleware.
-  How the signaling works for those two cases while staying inside the
-  onion-style layering principle is a detail that will have to be evaluated.
+- **Control flow implementation.** Recursion (for tools — see §3.5 for the
+  heavy-vs-light re-entry trade-off) and short-circuiting (for caching and
+  rate-limiting) will have to be available to middleware. How the signaling
+  works for those two cases while staying inside the onion-style layering
+  principle is a detail that will have to be evaluated.
 
 This contract is arguably the most architecturally important unresolved
 piece of the whole project, since it determines how much freedom exists on

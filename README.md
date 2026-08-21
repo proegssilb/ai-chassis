@@ -4,7 +4,7 @@ A system to bolt together real AIs, not just run LLMs.
 
 ## What this is
 
-With self-hosted AI, there's a strong emphasis on the LLM itself as the 
+With self-hosted AI, there's a strong emphasis on the LLM itself as the
 magic. With frontier models, this extends to the point of calling an
 entire production system of many moving pieces "a model". A complete AI
 system needs far more than just an LLM to deliver the value it promises.
