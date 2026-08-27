@@ -98,6 +98,8 @@ Candidate execution substrates for those processes (not yet committed to
 one):
 
 - **Docker containers** — mature, well-understood isolation, heavyweight.
+- **Docker compose stack** - More flexibly allows complex subsystems to act
+  as middleware, vs forcing subsystems into multi-process docker containers.
 - **Wasm runtimes** — lightweight, fast startup, sandboxed, less mature
   ecosystem for arbitrary middleware logic.
 - **Remote HTTP servers** — no isolation story of its own (relies on
